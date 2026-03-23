@@ -20,3 +20,4 @@ pdfplumber==0.10.3
 # Google Cloud Vision API for OCR
 Pillow>=11.0.0
 pydantic-settings==2.2.1
+python-multipart
