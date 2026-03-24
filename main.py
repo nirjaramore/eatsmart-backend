@@ -2047,24 +2047,29 @@ async def save_product_complete(payload: SaveProductCompleteRequest):
 
 
 @app.get('/products')
-async def list_products(limit: int = 50, offset: int = 0, region: Optional[str] = None, brand: Optional[str] = None):
-    """Return recent products from the `products` table with optional filters. If DB not configured, return empty list."""
+async def list_products(
+    limit: int = 50,
+    offset: int = 0,
+    region: Optional[str] = None,
+    brand: Optional[str] = None
+):
+    """Return recent products from the `products` table with optional filters."""
     try:
         if not data_agent or not data_agent.db_engine:
             return {"products": [], "total": 0, "regions": [], "brands": []}
 
-        # Build query with optional filters
+        # Build query
         where_clauses = []
         params = {"limit": limit, "offset": offset}
-        
+
         if region:
             where_clauses.append("region = :region")
             params["region"] = region
-        
+
         if brand:
             where_clauses.append("brand ILIKE :brand")
             params["brand"] = f"%{brand}%"
-        
+
         where_sql = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
 
         q = text(f"""
@@ -2075,64 +2080,73 @@ async def list_products(limit: int = 50, offset: int = 0, region: Optional[str] 
             ORDER BY created_at DESC
             LIMIT :limit OFFSET :offset
         """)
-        
-        # Get total count
+
         count_q = text(f"""
             SELECT COUNT(*) FROM products {where_sql}
         """)
-        
-        # Get unique regions and brands for filters
+
         regions_q = text("""
             SELECT DISTINCT region FROM products WHERE region IS NOT NULL ORDER BY region
         """)
-        
+
         brands_q = text("""
             SELECT DISTINCT brand FROM products WHERE brand IS NOT NULL ORDER BY brand LIMIT 100
         """)
-        
-        with data_agent.db_engine.connect() as conn:
-            res = conn.execute(q, params)
-            rows = []
-            for r in res.fetchall():
-                # SQLAlchemy RowMapping may not be serializable, convert to dict
-                try:
-                    rows.append({k: v for k, v in r.items()})
-                except Exception:
-                    # Fallback for older SQLAlchemy row tuples
-                    rows.append(dict(r))
-            
-            # Get total count
-            total = conn.execute(count_q, {k: v for k, v in params.items() if k not in ['limit', 'offset']}).scalar()
-            
-            # Get filter options
-            regions = [r[0] for r in conn.execute(regions_q).fetchall()]
-            brands = [r[0] for r in conn.execute(brands_q).fetchall()]
 
-        return {"products": rows, "total": total or 0, "regions": regions, "brands": brands}
+        with data_agent.db_engine.connect() as conn:
+
+            # ✅ FIXED PART (IMPORTANT)
+            result = conn.execute(q, params)
+            rows = [dict(row._mapping) for row in result]
+
+            # total count
+            total = conn.execute(
+                count_q,
+                {k: v for k, v in params.items() if k not in ['limit', 'offset']}
+            ).scalar()
+
+            # filters
+            regions = [r[0] for r in conn.execute(regions_q)]
+            brands = [r[0] for r in conn.execute(brands_q)]
+
+        return {
+            "products": rows,
+            "total": total or 0,
+            "regions": regions,
+            "brands": brands
+        }
+
     except Exception as e:
         logger.error(f"list_products error: {e}")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
 
 
 @app.get('/food-images')
-async def list_food_images(limit: int = 200, offset: int = 0, image_type: Optional[str] = None):
-    """Return food images from the `food_images` table. 
-    Image URLs should already be complete from Supabase bucket. If DB not configured, return empty list."""
+async def list_food_images(
+    limit: int = 200,
+    offset: int = 0,
+    image_type: Optional[str] = None
+):
+    """Return food images from the `food_images` table."""
+
     try:
         if not data_agent or not data_agent.db_engine:
             return {"products": [], "total": 0, "image_types": []}
 
-        # Build query with optional filters
+        # Filters
         where_clauses = ["image_url IS NOT NULL"]
         params = {"limit": limit, "offset": offset}
-        
+
         if image_type:
             where_clauses.append("image_type = :image_type")
             params["image_type"] = image_type
-        
-        where_sql = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
 
-        # Query food_images table only (no join with foods table for now)
+        where_sql = "WHERE " + " AND ".join(where_clauses)
+
+        # Main query
         q = text(f"""
             SELECT 
                 id,
@@ -2147,42 +2161,53 @@ async def list_food_images(limit: int = 200, offset: int = 0, image_type: Option
             ORDER BY uploaded_at DESC
             LIMIT :limit OFFSET :offset
         """)
-        
-        # Get total count
+
+        # Count query
         count_q = text(f"""
             SELECT COUNT(*) FROM food_images {where_sql}
         """)
-        
-        # Get unique image types for filters
+
+        # Filter options
         types_q = text("""
             SELECT DISTINCT image_type FROM food_images 
             WHERE image_type IS NOT NULL 
             ORDER BY image_type
         """)
-        
+
         with data_agent.db_engine.connect() as conn:
-            res = conn.execute(q, params)
-            rows = []
-            for r in res.fetchall():
-                # Convert Row to dict using _mapping attribute
-                row_dict = dict(r._mapping)
-                rows.append(row_dict)
-            
-            # Get total count
-            count_params = {k: v for k, v in params.items() if k not in ['limit', 'offset']}
+
+            # ✅ FIXED + OPTIMIZED
+            result = conn.execute(q, params)
+            rows = [dict(row._mapping) for row in result]
+
+            # total count
+            count_params = {
+                k: v for k, v in params.items() if k not in ['limit', 'offset']
+            }
             total = conn.execute(count_q, count_params).scalar()
-            
-            # Get filter options
-            image_types = [row[0] for row in conn.execute(types_q).fetchall()]
+
+            # image types
+            image_types = [row[0] for row in conn.execute(types_q)]
 
         logger.info(f"Returning {len(rows)} products from food_images table")
-        return {"products": rows, "total": total or 0, "image_types": image_types}
+
+        return {
+            "products": rows,
+            "total": total or 0,
+            "image_types": image_types
+        }
+
     except Exception as e:
         logger.error(f"list_food_images error: {e}")
         import traceback
         logger.error(traceback.format_exc())
-        # Return empty result instead of raising exception to maintain compatibility
-        return {"products": [], "total": 0, "image_types": [], "error": str(e)}
+
+        return {
+            "products": [],
+            "total": 0,
+            "image_types": [],
+            "error": str(e)
+        }
 
 
 # ==================== Run Server ====================
